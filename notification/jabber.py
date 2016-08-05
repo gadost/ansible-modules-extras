@@ -1,165 +1,99 @@
-#!/usr/bin/python
-# -*- coding: utf-8 -*-
+# Ansible CallBack module for Jabber (XMPP)
+# Copyright (C) 2016 maxn nikolaev.makc@gmail.com
 #
-# (c) 2015, Brian Coca <bcoca@ansible.com>
-#
-# This file is part of Ansible
-#
-# Ansible is free software: you can redistribute it and/or modify
+# This module is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 #
-# Ansible is distributed in the hope that it will be useful,
+# This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with Ansible.  If not, see <http://www.gnu.org/licenses/>
+# along with this program.  If not, see http://www.gnu.org/licenses/
+from __future__ import (absolute_import, division, print_function)
+__metaclass__ = type
 
-
-DOCUMENTATION = '''
----
-version_added: "1.2"
-module: jabber
-short_description: Send a message to jabber user or chat room
-description:
-   - Send a message to jabber
-options:
-  user:
-    description:
-      - User as which to connect
-    required: true
-  password:
-    description:
-      - password for user to connect
-    required: true
-  to:
-    description:
-      - user ID or name of the room, when using room use a slash to indicate your nick.
-    required: true
-  msg:
-    description:
-      - The message body.
-    required: true
-    default: null
-  host:
-    description:
-      - host to connect, overrides user info
-    required: false
-  port:
-    description:
-      - port to connect to, overrides default
-    required: false
-    default: 5222
-  encoding:
-    description:
-      - message encoding
-    required: false
-
-# informational: requirements for nodes
-requirements:
-    - python xmpp (xmpppy)
-author: "Brian Coca (@bcoca)"
-'''
-
-EXAMPLES = '''
-# send a message to a user
-- jabber: user=mybot@example.net
-          password=secret
-          to=friend@example.net
-          msg="Ansible task finished"
-
-# send a message to a room
-- jabber: user=mybot@example.net
-          password=secret
-          to=mychaps@conference.example.net/ansiblebot
-          msg="Ansible task finished"
-
-# send a message, specifying the host and port
-- jabber user=mybot@example.net
-         host=talk.example.net
-         port=5223
-         password=secret
-         to=mychaps@example.net
-         msg="Ansible task finished"
-'''
-
-import os
-import re
-import time
-
+import os,sys,re,socket
 HAS_XMPP = True
 try:
     import xmpp
 except ImportError:
     HAS_XMPP = False
 
-def main():
+from ansible.plugins.callback import CallbackBase
+from ansible import utils
+from ansible.module_utils import basic
+from ansible.utils.unicode import to_unicode, to_bytes
 
-    module = AnsibleModule(
-        argument_spec=dict(
-            user=dict(required=True),
-            password=dict(required=True, no_log=True),
-            to=dict(required=True),
-            msg=dict(required=True),
-            host=dict(required=False),
-            port=dict(required=False,default=5222),
-            encoding=dict(required=False),
-        ),
-        supports_check_mode=True
-    )
+class CallbackModule(CallbackBase):
 
-    if not HAS_XMPP:
-        module.fail_json(msg="The required python xmpp library (xmpppy) is not installed")
+    CALLBACK_VERSION = 1.0
+    CALLBACK_TYPE = 'notification'
+    CALLBACK_NAME = 'jabber'
+    CALLBACK_NEEDS_WHITELIST = True
 
-    jid = xmpp.JID(module.params['user'])
-    user = jid.getNode()
-    server = jid.getDomain()
-    port = module.params['port']
-    password = module.params['password']
-    try:
-        to, nick = module.params['to'].split('/', 1)
-    except ValueError:
-        to, nick = module.params['to'], None
+    def __init__(self):
 
-    if module.params['host']:
-        host = module.params['host']
-    else:
-        host = server
-    if module.params['encoding']:
-        xmpp.simplexml.ENCODING = params['encoding']
+        super(CallbackModule, self).__init__()
 
-    msg = xmpp.protocol.Message(body=module.params['msg'])
+        if not HAS_XMPP:
+            print ("The required python xmpp library (xmpppy) is not installed"
+             "pip install git+https://github.com/ArchipelProject/xmpppy")
 
-    try:
-        conn=xmpp.Client(server, debug=[])
-        if not conn.connect(server=(host,port)):
-            module.fail_json(rc=1, msg='Failed to connect to server: %s' % (server))
-        if not conn.auth(user,password,'Ansible'):
-            module.fail_json(rc=1, msg='Failed to authorize %s on: %s' % (user,server))
-        # some old servers require this, also the sleep following send
-        conn.sendInitPresence(requestRoster=0)
+        self.serv = os.getenv('JABBER_SERV')
+        self.j_user = os.getenv('JABBER_USER')
+        self.j_pass = os.getenv('JABBER_PASS')
+        self.j_to = os.getenv('JABBER_TO')
 
-        if nick: # sending to room instead of user, need to join
-            msg.setType('groupchat')
-            msg.setTag('x', namespace='http://jabber.org/protocol/muc#user')
-            conn.send(xmpp.Presence(to=module.params['to']))
-            time.sleep(1)
+        if (self.j_user or self.j_pass or self.serv) is None:
+            self.disabled = True
+            print ('Jabber CallBack want JABBER_USER and JABBER_PASS env variables')
+
+    def send_msg(self, msg):
+        """Send message"""
+        jid = xmpp.JID(self.j_user)
+        client = xmpp.Client(self.serv,debug=[])
+        client.connect(server=(self.serv,5222))
+        client.auth(jid.getNode(), self.j_pass, resource=jid.getResource())
+        message = xmpp.Message(self.j_to, msg)
+        message.setAttr('type', 'chat')
+        client.send(message)
+        client.disconnect()
+
+    def v2_runner_on_ok(self, result):
+        self._clean_results(result._result, result._task.action)
+        self.debug = self._dump_results(result._result)
+        
+    def v2_playbook_on_task_start(self, task, is_conditional):
+        self.task = task
+
+    def v2_playbook_on_play_start(self, play):
+        """Display Playbook and play start messages"""
+        self.play = play
+        name = play.name
+        playbook = play.name
+        self.send_msg("Ansible starting play: %s" % (name))
+
+    def playbook_on_stats(self, stats):
+        name = self.play
+        hosts = sorted(stats.processed.keys())
+        failures = False
+        unreachable = False
+        for h in hosts:
+            s = stats.summarize(h)
+            if s['failures'] > 0:
+                failures = True
+            if s['unreachable'] > 0:
+                unreachable = True
+
+        if failures or unreachable:
+            self.send_msg("%s: Failures detected \n%s \nHost: %s" % (name, self.task, h))
         else:
-            msg.setType('chat')
+            out = self.debug
+            self.send_msg("Great! \n Playbook %s complited:\n%s \n Last task debug:\n %s" % (name,s, out))
 
-        msg.setTo(to)
-        if not module.check_mode:
-            conn.send(msg)
-        time.sleep(1)
-        conn.disconnect()
-    except Exception, e:
-        module.fail_json(msg="unable to send msg: %s" % e)
 
-    module.exit_json(changed=False, to=to, user=user, msg=msg.getBody())
 
-# import module snippets
-from ansible.module_utils.basic import *
-main()
